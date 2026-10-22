@@ -125,4 +125,11 @@ def parse_odds_to_decimal(odds_str):
     if '/' in odds_str:
         try:
             num, den = odds_str.split('/')
-            return (float(num) / float(den)) +
+            return 1 + (float(num) / float(den))
+        except (ValueError, ZeroDivisionError):
+            return 2.0
+    try:
+        value = float(odds_str)
+        return 1 + value if value > 0 else 2.0
+    except ValueError:
+        return 2.0
