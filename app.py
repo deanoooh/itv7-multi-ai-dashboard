@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling for High Contrast
+# Custom Styling for High Contrast & Modern UI
 st.markdown("""
 <style>
     .stApp {
@@ -34,7 +34,7 @@ st.markdown("""
         font-size: 0.9rem !important;
         color: #000000 !important;             /* Pure Black Text */
         background-color: #f8f9fa !important;  /* Light Off-White Background */
-        font-weight: 600 !important;          /* Bold/Semi-bold for crisp readability */
+        font-weight: 600 !important;          /* Bold/Semi-bold readability */
         border: 2px solid #4a5568 !important;   /* Defined Border */
     }
     
@@ -43,6 +43,28 @@ st.markdown("""
         color: #ffffff !important;
         font-size: 1rem !important;
         font-weight: bold !important;
+    }
+
+    .badge-unanimous {
+        background-color: #1b5e20;
+        color: #81c784;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: bold;
+    }
+    .badge-majority {
+        background-color: #0d47a1;
+        color: #64b5f6;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: bold;
+    }
+    .badge-split {
+        background-color: #e65100;
+        color: #ffb74d;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -103,236 +125,4 @@ def parse_odds_to_decimal(odds_str):
     if '/' in odds_str:
         try:
             num, den = odds_str.split('/')
-            return (float(num) / float(den)) + 1.0
-        except ValueError:
-            return 2.0
-    try:
-        return float(odds_str) + 1.0
-    except ValueError:
-        return 2.0
-
-def parse_ai_text(text):
-    """Parses raw text selections into a structured list of dicts."""
-    races = []
-    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
-    for line in lines:
-        # Match time, course, runner/horse info
-        time_match = re.search(r'(\d{1,2}:\d{2})\s*([A-Za-z\s]+)?', line)
-        if time_match:
-            r_time = time_match.group(1)
-            course = time_match.group(2).strip() if time_match.group(2) else "Unknown"
-            
-            # Clean course name from noise
-            course = re.sub(r'[-–—].*', '', course).strip()
-            
-            # Match odds in parentheses or at end
-            odds_match = re.search(r'\(([\d/]+|evs)\)', line, re.IGNORECASE)
-            odds_str = odds_match.group(1) if odds_match else "2/1"
-            
-            # Clean horse name
-            cleaned = re.sub(r'^\d{1,2}:\d{2}\s*[-–—]?\s*', '', line)
-            cleaned = re.sub(r'\((.*?)\)', '', cleaned)
-            cleaned = re.sub(r'^\d+\s+', '', cleaned).strip()
-            cleaned = re.sub(r'^[-–—]\s*', '', cleaned).strip()
-            
-            races.append({
-                "time": r_time,
-                "course": course,
-                "runner": cleaned if cleaned else "Unassigned",
-                "odds_str": odds_str,
-                "odds_dec": parse_odds_to_decimal(odds_str)
-            })
-    return races
-
-def calculate_consensus(ai_list):
-    """Aggregates picks from up to 4 AIs and determines consensus pick and agreement level."""
-    # Index by time
-    race_map = {}
-    for idx, ai_picks in enumerate(ai_list):
-        for p in ai_picks:
-            r_time = p['time']
-            if r_time not in race_map:
-                race_map[r_time] = {'course': p['course'], 'picks': {}}
-            
-            runner = p['runner']
-            if runner not in race_map[r_time]['picks']:
-                race_map[r_time]['picks'][runner] = {
-                    'count': 0,
-                    'ais': [],
-                    'odds_str': p['odds_str'],
-                    'odds_dec': p['odds_dec']
-                }
-            race_map[r_time]['picks'][runner]['count'] += 1
-            race_map[r_time]['picks'][runner]['ais'].append(f"AI #{idx+1}")
-
-    consensus_results = []
-    for r_time, data in sorted(race_map.items()):
-        picks = data['picks']
-        # Sort runners by count descending
-        sorted_runners = sorted(picks.items(), key=lambda x: x[1]['count'], reverse=True)
-        top_runner, top_data = sorted_runners[0]
-        
-        count = top_data['count']
-        if count == 4:
-            agreement = "Unanimous (4/4)"
-            badge_class = "badge-unanimous"
-        elif count == 3:
-            agreement = "Strong Majority (3/3)"
-            badge_class = "badge-majority"
-        elif count == 2:
-            agreement = "Split / Overlap (2/4)"
-            badge_class = "badge-split"
-        else:
-            agreement = "No Overlap (1/4)"
-            badge_class = "badge-split"
-
-        # Apply Standard Staking Rules (< 2/1 trigger)
-        is_no_bet = False
-        if top_data['odds_dec'] < 2.0:
-            staking_rule = "🔴 No Bet Filter (< 2/1 SP Trigger)"
-            is_no_bet = True
-        elif top_data['odds_dec'] >= 6.0:
-            staking_rule = "Each-Way (£0.50 EW)"
-        else:
-            staking_rule = "Win Only (£1.00)"
-
-        consensus_results.append({
-            "time": r_time,
-            "course": data['course'],
-            "consensus_runner": top_runner,
-            "count": count,
-            "agreement": agreement,
-            "badge_class": badge_class,
-            "odds_str": top_data['odds_str'],
-            "odds_dec": top_data['odds_dec'],
-            "staking_rule": staking_rule,
-            "is_no_bet": is_no_bet,
-            "all_picks": picks
-        })
-    return consensus_results
-
-# ==========================================
-# APPLICATION LAYOUT
-# ==========================================
-st.title("🏇 ITV7 Multi-AI Racing Consensus & Audit Engine")
-st.caption("v5.27.0 Master Protocol • Digital Pipeline & Auto-Calculating Audit")
-
-# Sidebar - Settings & Quick Load
-with st.sidebar:
-    st.header("⚙️ Dashboard Controls")
-    if st.button("🔄 Load Monday Demo Data", use_container_width=True):
-        st.session_state['ai1_input'] = DEMO_AI1
-        st.session_state['ai2_input'] = DEMO_AI2
-        st.session_state['ai3_input'] = DEMO_AI3
-        st.session_state['ai4_input'] = DEMO_AI4
-        st.session_state['results_input'] = DEMO_RESULTS
-        st.success("Loaded Monday Wolverhampton demo cards!")
-
-    st.markdown("---")
-    st.subheader("Staking Rules Summary")
-    st.markdown("""
-    - **Odds < 2/1:** 🔴 No Bet Filter
-    - **Odds 2/1 - 5/1:** £1.00 Win Only
-    - **Odds ≥ 6/1:** £0.50 Each-Way (£1 total)
-    """)
-
-# Main Tabs
-tab1, tab2, tab3 = st.tabs(["📝 1. Paste & Selections Hub", "📊 2. Side-by-Side Comparison", "💰 3. Settlement & Audit"])
-
-# TAB 1: PASTE & SELECTIONS HUB
-with tab1:
-    st.subheader("Paste Selection Output Blocks")
-    st.info("Paste the daily raw text selections from your four AI prompt variations below.")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        ai1_text = st.text_area("AI #1 (ROI Variation A)", value=st.session_state.get('ai1_input', ''), height=180, key="ai1_area")
-        ai2_text = st.text_area("AI #2 (ROI Variation B)", value=st.session_state.get('ai2_input', ''), height=180, key="ai2_area")
-    with col2:
-        ai3_text = st.text_area("AI #3 (ROI Variation C)", value=st.session_state.get('ai3_input', ''), height=180, key="ai3_area")
-        ai4_text = st.text_area("AI #4 (v5.27.0 Master Engine)", value=st.session_state.get('ai4_input', ''), height=180, key="ai4_area")
-
-    ai1_parsed = parse_ai_text(ai1_text) if ai1_text else []
-    ai2_parsed = parse_ai_text(ai2_text) if ai2_text else []
-    ai3_parsed = parse_ai_text(ai3_text) if ai3_text else []
-    ai4_parsed = parse_ai_text(ai4_text) if ai4_text else []
-
-    all_ais = [ai1_parsed, ai2_parsed, ai3_parsed, ai4_parsed]
-    consensus_data = calculate_consensus(all_ais) if any(all_ais) else []
-
-    if consensus_data:
-        st.markdown("---")
-        st.subheader("🎯 Auto-Generated 5th Consensus Selections")
-        
-        c_rows = []
-        for c in consensus_data:
-            c_rows.append({
-                "Race Time": c['time'],
-                "Consensus Runner": c['consensus_runner'],
-                "Agreement": c['agreement'],
-                "Price": c['odds_str'],
-                "Staking Instruction": c['staking_rule']
-            })
-        st.dataframe(pd.DataFrame(c_rows), use_container_width=True)
-
-# TAB 2: SIDE-BY-SIDE COMPARISON MATRIX
-with tab2:
-    st.subheader("Multi-AI Side-by-Side Comparison Matrix")
-    
-    if not consensus_data:
-        st.warning("Please paste AI selections in Tab 1 or click 'Load Monday Demo Data' in the sidebar.")
-    else:
-        matrix_rows = []
-        for c in consensus_data:
-            r_time = c['time']
-            
-            # Helper to find pick by time
-            def get_pick(parsed_list):
-                for item in parsed_list:
-                    if item['time'] == r_time:
-                        return f"{item['runner']} ({item['odds_str']})"
-                return "-"
-
-            matrix_rows.append({
-                "Time": r_time,
-                "AI #1": get_pick(ai1_parsed),
-                "AI #2": get_pick(ai2_parsed),
-                "AI #3": get_pick(ai3_parsed),
-                "AI #4 (v5.27.0)": get_pick(ai4_parsed),
-                "5th Consensus Pick": f"⭐ {c['consensus_runner']} ({c['odds_str']})",
-                "Overlap": f"{c['count']}/4"
-            })
-        
-        st.dataframe(pd.DataFrame(matrix_rows), use_container_width=True)
-
-# TAB 3: SETTLEMENT & AUDIT
-with tab3:
-    st.subheader("Automated Settlement & P/L Audit")
-    results_text = st.text_area("Paste Race Results Here:", value=st.session_state.get('results_input', ''), height=150)
-    
-    if st.button("🚀 Calculate & Settle Performance", type="primary"):
-        st.markdown("---")
-        st.subheader("Daily Financial Performance Summary")
-        
-        # Display Summary Metric Cards
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        with col_m1:
-            st.metric("Total Races Analyzed", len(consensus_data) if consensus_data else 7)
-        with col_m2:
-            st.metric("Total Stakes Placed", "£20.00")
-        with col_m3:
-            st.metric("Total Returns", "£13.38", delta="-£6.62")
-        with col_m4:
-            st.metric("Consensus Daily ROI", "-33.09%")
-
-        st.markdown("---")
-        st.subheader("Model-by-Model Side-by-Side Settlement")
-        
-        audit_summary = pd.DataFrame([
-            {"Engine / Model": "AI #1 (Variation A)", "Staked": "£7.00", "Returned": "£8.50", "Net P/L": "+£1.50", "ROI": "+21.4%"},
-            {"Engine / Model": "AI #2 (Variation B)", "Staked": "£7.00", "Returned": "£4.20", "Net P/L": "-£2.80", "ROI": "-40.0%"},
-            {"Engine / Model": "AI #3 (Variation C)", "Staked": "£7.00", "Returned": "£9.10", "Net P/L": "+£2.10", "ROI": "+30.0%"},
-            {"Engine / Model": "AI #4 (v5.27.0 Master)", "Staked": "£7.00", "Returned": "£0.83", "Net P/L": "-£6.17", "ROI": "-88.1%"},
-            {"Engine / Model": "⭐ 5th Consensus Engine", "Staked": "£20.00", "Returned": "£13.38", "Net P/L": "-£6.62", "ROI": "-33.1%"}
-        ])
-        st.table(audit_summary)
+            return (float(num) / float(den)) +
