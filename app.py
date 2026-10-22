@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling
+# Custom Styling for High Contrast
 st.markdown("""
 <style>
     .stApp {
@@ -27,30 +27,22 @@ st.markdown("""
         padding: 15px;
         text-align: center;
     }
+    
+    /* HIGH CONTRAST BLACK TEXT FOR PASTE BOXES */
     .stTextArea textarea {
-        font-family: 'Courier New', Courier, monospace;
-        font-size: 0.85rem;
+        font-family: 'Courier New', Courier, monospace !important;
+        font-size: 0.9rem !important;
+        color: #000000 !important;             /* Pure Black Text */
+        background-color: #f8f9fa !important;  /* Light Off-White Background */
+        font-weight: 600 !important;          /* Bold/Semi-bold for crisp readability */
+        border: 2px solid #4a5568 !important;   /* Defined Border */
     }
-    .badge-unanimous {
-        background-color: #1b5e20;
-        color: #81c784;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    .badge-majority {
-        background-color: #0d47a1;
-        color: #64b5f6;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-    }
-    .badge-split {
-        background-color: #e65100;
-        color: #ffb74d;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: bold;
+    
+    /* High contrast labels above text boxes */
+    .stTextArea label {
+        color: #ffffff !important;
+        font-size: 1rem !important;
+        font-weight: bold !important;
     }
 </style>
 """, unsafe_allow_html=True)
