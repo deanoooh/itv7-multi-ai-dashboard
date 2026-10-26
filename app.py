@@ -69,7 +69,7 @@ def parse_odds_to_decimal(odds_str):
     """Converts odds string (e.g. '11/4', '2/1', '8/11', 'Evs') to decimal odds."""
     if not odds_str:
         return 2.0
-    odds_str = odds_str.strip().lower()
+    odds_str = odds_str.strip().lower().replace(' ', '')
     if odds_str in ['evs', 'eve', 'even', 'evens']:
         return 2.0
     if '/' in odds_str:
@@ -82,6 +82,7 @@ def parse_odds_to_decimal(odds_str):
         return float(odds_str) + 1.0
     except ValueError:
         return 2.0
+
 
 def parse_ai_text(text):
     """
@@ -133,7 +134,7 @@ def parse_ai_text(text):
                         continue
                     if re.fullmatch(r'\(\d+\)', clean):
                         continue
-                    if clean.lower() in {'hd', 'nk', 'sh', '1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th', '11th', '12th', '13th', '14th', '15th', '16th'}:
+                    if re.fullmatch(r'\d+(?:st|nd|rd|th)', clean, re.IGNORECASE):
                         continue
                     if re.fullmatch(r'[\d\s¼½¾+-]+', clean):
                         continue
@@ -288,6 +289,132 @@ def calculate_consensus(ai_list):
         })
     return consensus_results
 
+
+def extract_stake_from_rule(staking_rule):
+    if not staking_rule:
+        return 1.0
+    staking_rule = staking_rule.lower()
+    if 'no bet' in staking_rule:
+        return 0.0
+    if 'each-way' in staking_rule:
+        return 0.5
+    if 'win only' in staking_rule:
+        return 1.0
+    return 1.0
+
+
+def parse_race_results(results_text):
+    """Parses race result sheets and returns a mapping keyed by (time, course)."""
+    if not results_text or not results_text.strip():
+        return {}
+
+    results = {}
+    active_race = None
+    lines = [line.strip() for line in results_text.split('\n') if line.strip()]
+
+    for line in lines:
+        line_lower = line.lower()
+
+        # Ignore common metadata lines.
+        if any(keyword in line_lower for keyword in ['going:', 'runners:', 'e/w:', 'odds', 'places', 'distance', 'class', 'handicap', 'standard']):
+            continue
+
+        # Race header: '13:25 Redcar – Going: Heavy – Runners: 14 ...'
+        header_match = re.match(r'^\s*(\d{1,2}:\d{2})\s*[-–—]?\s*([A-Za-z][A-Za-z0-9&\'\s.-]+?)(?:\s*[-–—].*)?$', line, re.IGNORECASE)
+        if header_match:
+            time_value = header_match.group(1)
+            course_name = header_match.group(2).strip()
+            course_name = re.sub(r'\s*[-–—].*$', '', course_name).strip()
+            active_race = {
+                'time': time_value,
+                'course': course_name or 'Unknown',
+                'key': (time_value, course_name or 'Unknown')
+            }
+            continue
+
+        # Result rows: '1st – Winner – (8) – Kartini – ... – 13/2'
+        if re.match(r'^(?:\d+(?:st|nd|rd|th)|PU)\b', line, re.IGNORECASE):
+            odds_match = re.search(r'(\d+\s*/\s*\d+(?:[a-zA-Z]+)?|evs|eve)', line, re.IGNORECASE)
+            if not odds_match or active_race is None:
+                continue
+
+            odds_str = re.sub(r'\s+', '', odds_match.group(1))
+            odds_dec = parse_odds_to_decimal(odds_str)
+            line_without_odds = line[:odds_match.start()].rstrip()
+            tokens = [p.strip() for p in re.split(r'\s*[-–—]\s*', line_without_odds) if p.strip()]
+
+            runner = None
+            for token in reversed(tokens):
+                clean = token.strip()
+                if clean.lower() in {'winner', 'pu'}:
+                    continue
+                if re.fullmatch(r'\(\d+\)', clean):
+                    continue
+                if re.fullmatch(r'\d+(?:st|nd|rd|th)', clean, re.IGNORECASE):
+                    continue
+                if re.fullmatch(r'[\d\s¼½¾+-]+', clean):
+                    continue
+                if clean and re.search(r'[A-Za-z]', clean):
+                    runner = clean
+                    break
+
+            if runner:
+                results[active_race['key']] = {
+                    'winner': runner,
+                    'odds_str': odds_str,
+                    'odds_dec': odds_dec,
+                    'time': active_race['time'],
+                    'course': active_race['course']
+                }
+
+    return results
+
+
+def calculate_settlement(consensus_data, results_text):
+    """Calculates win/loss for the consensus pick of each race against the pasted result sheet."""
+    result_map = parse_race_results(results_text)
+    rows = []
+    total_pnl = 0.0
+
+    for race in consensus_data:
+        r_time = race['time']
+        r_course = race['course']
+        key = (r_time, r_course)
+        selection = race['consensus_runner']
+        stake = extract_stake_from_rule(race.get('staking_rule', ''))
+
+        if race.get('is_no_bet') or stake == 0:
+            pnl = 0.0
+            status = 'NO BET'
+            winner = '-'
+        elif key not in result_map:
+            pnl = 0.0
+            status = 'NO RESULT'
+            winner = '-'
+        else:
+            result = result_map[key]
+            winner = result['winner']
+            if selection.lower() == winner.lower():
+                pnl = (result['odds_dec'] - 1.0) * stake
+                status = 'WIN'
+            else:
+                pnl = -stake
+                status = 'LOSS'
+
+        total_pnl += pnl
+        rows.append({
+            'Time': r_time,
+            'Course': r_course,
+            'Selection': selection,
+            'Winner': winner,
+            'Stake': stake,
+            'Status': status,
+            'P/L': round(pnl, 2)
+        })
+
+    return rows, round(total_pnl, 2)
+
+
 # ==========================================
 # APPLICATION LAYOUT
 # ==========================================
@@ -374,3 +501,21 @@ with tab2:
 with tab3:
     st.subheader("Automated Settlement & P/L Audit")
     results_text = st.text_area("Paste Race Results Here:", value=st.session_state.get('results_input', ''), height=150)
+
+    if consensus_data and results_text.strip():
+        settlement_rows, total_pnl = calculate_settlement(consensus_data, results_text)
+        df_settlement = pd.DataFrame(settlement_rows)
+
+        col_total, col_wins, col_losses = st.columns(3)
+        with col_total:
+            st.metric("Total P/L", f"£{total_pnl:.2f}")
+        with col_wins:
+            st.metric("Wins", sum(1 for r in settlement_rows if r['Status'] == 'WIN'))
+        with col_losses:
+            st.metric("Losses", sum(1 for r in settlement_rows if r['Status'] == 'LOSS'))
+
+        st.dataframe(df_settlement, use_container_width=True)
+    elif not consensus_data:
+        st.warning("Please complete Tab 1 first so there are actual consensus selections to settle.")
+    else:
+        st.info("Paste the full racecard/result sheet to calculate P/L against the current consensus picks.")
