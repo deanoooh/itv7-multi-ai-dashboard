@@ -62,6 +62,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+TIPSTER_PRIORITY = {"Gemini": 0, "Copilot": 1, "ChatGPT": 2, "WildCard": 3}
+TIER_ORDER = ["PRIMARY", "SECONDARY", "CHAOS"]
+
 # ==========================================
 # HELPER FUNCTIONS & PARSERS
 # ==========================================
@@ -84,42 +87,303 @@ def parse_odds_to_decimal(odds_str):
         return 2.0
 
 
+def clean_runner_name(value):
+    value = value.strip()
+    value = value.replace('🔴', '').replace('No Bet', '').replace('no bet', '').strip()
+    value = re.sub(r'\s+', ' ', value)
+    value = re.sub(r'\s*[|;]\s*$', '', value)
+    value = value.strip(' -–—:')
+    return value
+
+
+def parse_confidence(value):
+    if not value:
+        return None
+    m = re.search(r'(?:Conf(?:idence)?\s*[:=]?\s*|\(\s*Conf(?:idence)?\s*[:=]?\s*)(\d+)', value, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'\b(\d)\b', value)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def extract_odds(value):
+    match = re.search(r'(\d+\s*/\s*\d+|evs|eve|even|evens)', value, re.IGNORECASE)
+    if match:
+        return re.sub(r'\s+', '', match.group(1))
+    return None
+
+
+def is_no_bet_flag(value):
+    return '🔴' in value or 'no bet' in value.lower() or 'no-bet' in value.lower()
+
+
+def parse_field_size(text):
+    m = re.search(r'(?:Runners?|Field(?:\s+size)?)\s*[:=]\s*(\d+)', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def parse_structured_tipster_block(text, tipster_name):
+    """Parse a tipster's structured selections of the form:
+    13:25 Redcar | Runners: 14 | PRIMARY: Horse (2/1) | SECONDARY: Horse (5/1) | CHAOS: Horse (20/1) | Confidence: 7
+    """
+    if not text or not text.strip():
+        return {}
+
+    records = {}
+    lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
+    current_time = None
+    current_course = "Unknown"
+    current_field_size = None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Race header detection
+        header_match = re.search(r'(\d{1,2}:\d{2})\s*[-–—]?\s*([A-Za-z][A-Za-z0-9&\'\s.-]+)', line)
+        if header_match:
+            current_time = header_match.group(1)
+            current_course = header_match.group(2).strip()
+            current_course = re.sub(r'\s*[-–—].*$', '', current_course).strip() or 'Unknown'
+            current_field_size = parse_field_size(line)
+            continue
+
+        if current_time is None:
+            continue
+
+        # Split on pipes or semicolons, then parse tier labels
+        for part in re.split(r'\s*[|;]\s*', line):
+            if not part:
+                continue
+            part_l = part.strip()
+            for tier in TIER_ORDER:
+                if re.match(rf'^{tier}\s*[:\-]', part_l, re.IGNORECASE):
+                    value = re.sub(rf'^{tier}\s*[:\-]\s*', '', part_l, flags=re.IGNORECASE).strip()
+                    odds = extract_odds(value)
+                    if not odds:
+                        continue
+                    runner = value[:value.rfind('(')] if '(' in value else value
+                    runner = clean_runner_name(runner)
+                    if not runner:
+                        continue
+
+                    if runner.lower() in ['unknown', 'na', 'n/a']:
+                        continue
+
+                    conf = parse_confidence(value)
+                    flag = is_no_bet_flag(value)
+                    race_key = (current_time, current_course)
+                    if race_key not in records:
+                        records[race_key] = {
+                            'time': current_time,
+                            'course': current_course,
+                            'field_size': current_field_size,
+                            'tiers': {tier_name: None for tier_name in TIER_ORDER},
+                            'tipster': tipster_name,
+                            'flagged': []
+                        }
+
+                    records[race_key]['tiers'][tier] = {
+                        'runner': runner,
+                        'odds_str': odds,
+                        'odds_dec': parse_odds_to_decimal(odds),
+                        'confidence': conf,
+                        'flag': flag,
+                        'tipster': tipster_name
+                    }
+
+    # Allow single-line inputs where all tiers are on one line after the race header
+    if not records:
+        # Build a single-pass from the whole block if not already parsed
+        block = text.strip()
+        # detect time+course and then parse all tiers from remaining text
+        header_match = re.search(r'(\d{1,2}:\d{2})\s*[-–—]?\s*([A-Za-z][A-Za-z0-9&\'\s.-]+)', block)
+        if header_match:
+            current_time = header_match.group(1)
+            current_course = header_match.group(2).strip()
+            current_course = re.sub(r'\s*[-–—].*$', '', current_course).strip() or 'Unknown'
+            current_field_size = parse_field_size(block)
+            record = {'time': current_time, 'course': current_course, 'field_size': current_field_size, 'tiers': {tier_name: None for tier_name in TIER_ORDER}, 'tipster': tipster_name, 'flagged': []}
+            for tier in TIER_ORDER:
+                tier_match = re.search(rf'(?i){tier}\s*[:\-]\s*(.*?)(?=(?:\s*(?:\||;|\bPRIMARY\b|\bSECONDARY\b|\bCHAOS\b))|$)', block)
+                if tier_match:
+                    value = tier_match.group(1).strip()
+                    odds = extract_odds(value)
+                    if odds:
+                        runner = value[:value.rfind('(')] if '(' in value else value
+                        runner = clean_runner_name(runner)
+                        conf = parse_confidence(value)
+                        flag = is_no_bet_flag(value)
+                        if runner:
+                            record['tiers'][tier] = {'runner': runner, 'odds_str': odds, 'odds_dec': parse_odds_to_decimal(odds), 'confidence': conf, 'flag': flag, 'tipster': tipster_name}
+            records[(current_time, current_course)] = record
+
+    return records
+
+
+def build_dynamic_consensus(all_tipster_data):
+    """Applies the 8-Rule Dynamic Consensus Engine per race.
+    all_tipster_data is a list of dicts keyed by (time, course), one dict per tipster.
+    """
+    race_map = {}
+
+    # Combine all tipsters' race records by race key
+    for tipster_name, data in all_tipster_data.items():
+        for race_key, record in data.items():
+            if race_key not in race_map:
+                race_map[race_key] = {
+                    'time': record['time'],
+                    'course': record['course'],
+                    'field_size': record.get('field_size'),
+                    'tipsters': {}
+                }
+            race_map[race_key]['tipsters'][tipster_name] = record['tiers']
+
+    result = []
+    warnings = []
+
+    for race_key in sorted(race_map, key=lambda k: (race_map[k]['time'], race_map[k]['course'])):
+        race = race_map[race_key]
+        time = race['time']
+        course = race['course']
+        field_size = race.get('field_size')
+
+        # Flag missing confidence scores
+        missing_conf = []
+        for tipster_name, tiers in race['tipsters'].items():
+            for tier_name, pick in tiers.items():
+                if pick and pick.get('confidence') is None:
+                    missing_conf.append(f"{tipster_name} {tier_name}")
+        if missing_conf:
+            warnings.append(f"{time} {course}: Missing confidence score for {', '.join(missing_conf)}")
+
+        # Flag missing unclear field sizes
+        if field_size is None:
+            warnings.append(f"{time} {course}: Missing or unclear field size — SPPF pending")
+
+        # Build vote tallies per tier with de-duplication across tiers
+        consensus = {}
+        used_horses = set()
+        value_flags = []
+
+        for tier in TIER_ORDER:
+            tier_votes = {}
+            for tipster_name in TIPSTER_PRIORITY:
+                if tipster_name not in race['tipsters']:
+                    continue
+                pick = race['tipsters'][tipster_name].get(tier)
+                if not pick:
+                    continue
+                runner = pick['runner']
+                if runner in used_horses:
+                    continue
+                if runner not in tier_votes:
+                    tier_votes[runner] = {'count': 0, 'confidence_values': [], 'tipster_order': []}
+                tier_votes[runner]['count'] += 1
+                if pick.get('confidence') is not None:
+                    tier_votes[runner]['confidence_values'].append(pick['confidence'])
+                tier_votes[runner]['tipster_order'].append(TIPSTER_PRIORITY[tipster_name])
+
+            if not tier_votes:
+                consensus[tier] = None
+                continue
+
+            def winner_sort_key(item):
+                runner, data = item
+                avg_conf = np.mean(data['confidence_values']) if data['confidence_values'] else 0.0
+                earliest_tipster = min(data['tipster_order']) if data['tipster_order'] else 999
+                return (data['count'], avg_conf, -earliest_tipster)
+
+            chosen_runner, chosen_data = sorted(tier_votes.items(), key=winner_sort_key, reverse=True)[0]
+            consensus[tier] = {
+                'runner': chosen_runner,
+                'votes': chosen_data['count'],
+                'odds_str': next(
+                    (
+                        race['tipsters'][tn][tier]['odds_str']
+                        for tn in TIPSTER_PRIORITY
+                        if tn in race['tipsters'] and race['tipsters'][tn].get(tier) and race['tipsters'][tn][tier]['runner'] == chosen_runner
+                    ),
+                    '2/1'
+                ),
+                'confidence_avg': float(np.mean(chosen_data['confidence_values'])) if chosen_data['confidence_values'] else None,
+                'tie_break': 'Confidence weighted' if chosen_data['confidence_values'] else 'Listed order fallback',
+                'used_tipsters': [
+                    tn for tn in TIPSTER_PRIORITY
+                    if tn in race['tipsters'] and race['tipsters'][tn].get(tier) and race['tipsters'][tn][tier]['runner'] == chosen_runner
+                ]
+            }
+            used_horses.add(chosen_runner)
+
+        primary_choice = consensus.get('PRIMARY')
+        secondary_choice = consensus.get('SECONDARY')
+
+        sppf = None
+        if primary_choice:
+            primary_odds_dec = parse_odds_to_decimal(primary_choice['odds_str'])
+            if field_size is not None and field_size >= 6 and primary_choice['votes'] >= 3 and 2.0 < primary_odds_dec <= 3.0:
+                sppf = {
+                    'triggered': True,
+                    'field_size': field_size,
+                    'primary_demoted': primary_choice['runner'],
+                    'secondary_promoted': secondary_choice['runner'] if secondary_choice else None,
+                    'note': 'SPPF triggered'
+                }
+                if secondary_choice:
+                    consensus['SECONDARY'] = primary_choice
+                    consensus['PRIMARY'] = secondary_choice
+                    # Do not re-check SPPF; promoted horse stays as primary
+
+        if field_size is None and primary_choice is not None:
+            sppf = {'triggered': False, 'field_size': None, 'note': 'SPPF pending'}
+
+        # Value flag on chaos horses at 5/1 or longer backed by 2+ tipsters
+        if field_size is not None and consensus.get('CHAOS'):
+            chaos_runner = consensus['CHAOS']['runner']
+            chaos_votes = 0
+            for tipster_name in TIPSTER_PRIORITY:
+                if tipster_name not in race['tipsters']:
+                    continue
+                pick = race['tipsters'][tipster_name].get('CHAOS')
+                if pick and pick['runner'] == chaos_runner:
+                    chaos_votes += 1
+            chaos_odds_dec = parse_odds_to_decimal(consensus['CHAOS']['odds_str'])
+            if chaos_votes >= 2 and chaos_odds_dec >= 6.0:
+                value_flags.append(f"{chaos_runner} ({consensus['CHAOS']['odds_str']}) at 5/1+ backed by {chaos_votes} tipsters")
+
+        result.append({
+            'time': time,
+            'course': course,
+            'distance': 'Unknown',
+            'runners': field_size or 'Unknown',
+            'sppf': sppf,
+            'consensus': consensus,
+            'value_flags': value_flags,
+            'warnings': warnings
+        })
+
+    return result
+
+
 def parse_ai_text(text):
-    """
-    Parses input blocks. Handles:
-      - standard lines: '13:35 Doncaster - 1 Big Cigar (4/1)'
-      - multi-tier lines: '13:35 Doncaster | Primary: Big Cigar (4/1) | Secondary: ... | Chaos: ...'
-      - full result-sheet style rows: '1st – Winner – (8) – Kartini – P Mulrennan – ... – 13/2'
-    """
+    """Original parser retained for backwards compatibility with the simpler app format."""
     races = []
     lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
 
-    current_time = None
-    current_course = "Unknown"
     header_keywords = ['going', 'runners', 'e/w', 'odds', 'places', 'distance', 'class', 'handicap', 'standard']
 
     for line in lines:
         line_lower = line.lower()
-
-        # Detect race headers like '15:55 Galway – Going: Heavy – Runners: 19 ...'
-        header_match = re.match(
-            r'^\s*(\d{1,2}:\d{2})\s*[-–—]?\s*([A-Za-z][A-Za-z0-9&\'\s.-]+?)(?:\s*[-–—]\s*(?:Going|Runners|E/W|Odds|Places|Distance|Class|Handicap|Standard).*)?$',
-            line,
-            re.IGNORECASE
-        )
-        if header_match:
-            current_time = header_match.group(1)
-            course = header_match.group(2).strip()
-            course = re.sub(r'\s*[-–—].*$', '', course).strip()
-            current_course = course or "Unknown"
-            continue
-
         if any(keyword in line_lower for keyword in header_keywords) and not re.search(r'(\d+\s*/\s*\d+|evs)', line_lower):
             continue
 
         # Full result-sheet rows like:
         # '1st – Winner – (8) – Kartini – P Mulrennan – S Whitaker – 13/2'
-        # 'PU – (1) – Grace Faraday – James Smith (3) – A McCann – 13/2'
         if re.match(r'^(?:\d+(?:st|nd|rd|th)|PU)\b', line, re.IGNORECASE):
             odds_match = re.search(r'(\d+\s*/\s*\d+(?:[a-zA-Z]+)?|evs|eve)', line, re.IGNORECASE)
             if odds_match:
@@ -144,8 +408,8 @@ def parse_ai_text(text):
 
                 if runner:
                     races.append({
-                        "time": current_time or "Unknown",
-                        "course": current_course,
+                        "time": "Unknown",
+                        "course": "Unknown",
                         "runner": runner,
                         "odds_str": odds_str,
                         "odds_dec": parse_odds_to_decimal(odds_str),
@@ -155,14 +419,12 @@ def parse_ai_text(text):
                     })
                     continue
 
-        # Standard parser continues below
         time_match = re.search(r'(\d{1,2}:\d{2})\s*([A-Za-z\s]+)?', line)
         if time_match:
             r_time = time_match.group(1)
             course = time_match.group(2).strip() if time_match.group(2) else "Unknown"
             course = re.sub(r'[-–|—].*', '', course).strip()
 
-            # Check for multi-tier line (Primary/Secondary/Chaos)
             if 'primary:' in line_lower:
                 p_match = re.search(r'primary:\s*([^|(]+)\s*\(([\d/]+|evs)\)', line, re.IGNORECASE)
                 s_match = re.search(r'secondary:\s*([^|(]+)\s*\(([\d/]+|evs)\)', line, re.IGNORECASE)
@@ -170,10 +432,8 @@ def parse_ai_text(text):
 
                 p_runner = p_match.group(1).strip() if p_match else "N/A"
                 p_odds = p_match.group(2) if p_match else "2/1"
-
                 s_runner = s_match.group(1).strip() if s_match else "N/A"
                 s_odds = s_match.group(2) if s_match else "2/1"
-
                 c_runner = c_match.group(1).strip() if c_match else "N/A"
                 c_odds = c_match.group(2) if c_match else "2/1"
 
@@ -188,10 +448,8 @@ def parse_ai_text(text):
                     "chaos": f"{c_runner} ({c_odds})"
                 })
             else:
-                # Standard single-runner line
                 odds_match = re.search(r'\(([\d/]+|evs)\)', line, re.IGNORECASE)
                 odds_str = odds_match.group(1) if odds_match else "2/1"
-
                 cleaned = re.sub(r'^\d{1,2}:\d{2}\s*[-–—]?\s*', '', line)
                 cleaned = re.sub(r'\((.*?)\)', '', cleaned)
                 cleaned = re.sub(r'^\d+\s+', '', cleaned).strip()
@@ -258,19 +516,14 @@ def calculate_consensus(ai_list):
 
         # PROFITABILITY & STAKING FILTER LOGIC
         is_no_bet = False
-
-        # Rule 1: Odds < 2/1 (Poor margin/odds cutoff)
         if odds_dec < 2.0:
             staking_rule = "🔴 No Bet (Price < 2/1)"
             is_no_bet = True
-        # Rule 2: Low Consensus / High Risk (Single AI pick at extreme odds >= 12/1)
         elif count == 1 and odds_dec >= 13.0:
             staking_rule = "🔴 No Bet (Unprofitable Risk Profile)"
             is_no_bet = True
-        # Rule 3: Win Only Staking (2/1 to 5/1)
         elif odds_dec < 6.0:
             staking_rule = "Win Only (£1.00)"
-        # Rule 4: Each-Way Staking (>= 6/1)
         else:
             staking_rule = "Each-Way (£0.50 EW)"
 
@@ -314,8 +567,6 @@ def parse_race_results(results_text):
 
     for line in lines:
         line_lower = line.lower()
-
-        # Ignore common metadata lines.
         if any(keyword in line_lower for keyword in ['going:', 'runners:', 'e/w:', 'odds', 'places', 'distance', 'class', 'handicap', 'standard']):
             continue
 
@@ -332,7 +583,6 @@ def parse_race_results(results_text):
             }
             continue
 
-        # Result rows: '1st – Winner – (8) – Kartini – ... – 13/2'
         if re.match(r'^(?:\d+(?:st|nd|rd|th)|PU)\b', line, re.IGNORECASE):
             odds_match = re.search(r'(\d+\s*/\s*\d+(?:[a-zA-Z]+)?|evs|eve)', line, re.IGNORECASE)
             if not odds_match or active_race is None:
@@ -419,7 +669,7 @@ def calculate_settlement(consensus_data, results_text):
 # APPLICATION LAYOUT
 # ==========================================
 st.title("🏇 ITV7 Multi-AI Racing Consensus & Audit Engine")
-st.caption("v5.27.0 Master Protocol • Digital Pipeline & Auto-Calculating Audit")
+st.caption("v5.23.2 Dynamic Consensus • Digital Pipeline & Auto-Calculating Audit")
 
 # Main Tabs
 tab1, tab2, tab3 = st.tabs(["📝 1. Paste & Selections Hub", "📊 2. Side-by-Side Comparison", "💰 3. Settlement & Audit"])
@@ -427,23 +677,51 @@ tab1, tab2, tab3 = st.tabs(["📝 1. Paste & Selections Hub", "📊 2. Side-by-S
 # TAB 1: PASTE & SELECTIONS HUB
 with tab1:
     st.subheader("Paste Selection Output Blocks")
-    st.info("Paste the daily raw text selections from your four AI prompt variations below, or a full racecard/result sheet in the same format you receive it.")
+    st.info("Use either the original simple format, or the 8-Rule Dynamic consensus format: 13:25 Redcar | Runners: 14 | PRIMARY: Horse (2/1) | SECONDARY: Horse (5/1) | CHAOS: Horse (20/1) | Confidence: 7")
 
     col1, col2 = st.columns(2)
     with col1:
-        ai1_text = st.text_area("AI #1 (ROI Variation A)", value=st.session_state.get('ai1_input', ''), height=180, key="ai1_area")
-        ai2_text = st.text_area("AI #2 (ROI Variation B)", value=st.session_state.get('ai2_input', ''), height=180, key="ai2_area")
+        ai1_text = st.text_area("Gemini", value=st.session_state.get('ai1_input', ''), height=180, key="ai1_area")
+        ai2_text = st.text_area("Copilot", value=st.session_state.get('ai2_input', ''), height=180, key="ai2_area")
     with col2:
-        ai3_text = st.text_area("AI #3 (ROI Variation C)", value=st.session_state.get('ai3_input', ''), height=180, key="ai3_area")
-        ai4_text = st.text_area("AI #4 (v5.27.0 Master Engine)", value=st.session_state.get('ai4_input', ''), height=180, key="ai4_area")
+        ai3_text = st.text_area("ChatGPT", value=st.session_state.get('ai3_input', ''), height=180, key="ai3_area")
+        ai4_text = st.text_area("WildCard", value=st.session_state.get('ai4_input', ''), height=180, key="ai4_area")
 
     ai1_parsed = parse_ai_text(ai1_text) if ai1_text else []
     ai2_parsed = parse_ai_text(ai2_text) if ai2_text else []
     ai3_parsed = parse_ai_text(ai3_text) if ai3_text else []
     ai4_parsed = parse_ai_text(ai4_text) if ai4_text else []
 
+    # Dynamic consensus engine using per-tipster structured blocks
+    structured_data = {
+        "Gemini": parse_structured_tipster_block(ai1_text, "Gemini") if ai1_text else {},
+        "Copilot": parse_structured_tipster_block(ai2_text, "Copilot") if ai2_text else {},
+        "ChatGPT": parse_structured_tipster_block(ai3_text, "ChatGPT") if ai3_text else {},
+        "WildCard": parse_structured_tipster_block(ai4_text, "WildCard") if ai4_text else {},
+    }
+
+    dynamic_consensus = build_dynamic_consensus(structured_data) if any(structured_data.values()) else []
+
     all_ais = [ai1_parsed, ai2_parsed, ai3_parsed, ai4_parsed]
     consensus_data = calculate_consensus(all_ais) if any(all_ais) else []
+    if dynamic_consensus:
+        consensus_data = []
+        for race in dynamic_consensus:
+            primary = race['consensus'].get('PRIMARY')
+            if primary:
+                consensus_data.append({
+                    'time': race['time'],
+                    'course': race['course'],
+                    'consensus_runner': primary['runner'],
+                    'count': primary['votes'],
+                    'agreement': f"Primary consensus ({primary['votes']}/4)",
+                    'badge_class': 'badge-majority',
+                    'odds_str': primary['odds_str'],
+                    'odds_dec': parse_odds_to_decimal(primary['odds_str']),
+                    'staking_rule': 'Win Only (£1.00)',
+                    'is_no_bet': False,
+                    'all_picks': {}
+                })
 
     if consensus_data:
         st.markdown("---")
@@ -461,8 +739,24 @@ with tab1:
 
         df_consensus = pd.DataFrame(c_rows)
         df_consensus.index = np.arange(1, len(df_consensus) + 1)
-
         st.dataframe(df_consensus, use_container_width=True)
+
+        if dynamic_consensus:
+            st.subheader("⚠️ Dynamic Consensus Audit")
+            for race in dynamic_consensus:
+                st.write(f"{race['time']} {race['course']} — Runners: {race['runners']}")
+                if race['sppf']:
+                    if race['sppf']['triggered']:
+                        st.write(f"SPPF triggered — field size {race['sppf']['field_size']} — {race['sppf']['primary_demoted']} demoted, {race['sppf']['secondary_promoted']} promoted")
+                    else:
+                        st.write("SPPF pending")
+                for tier in TIER_ORDER:
+                    pick = race['consensus'].get(tier)
+                    if pick:
+                        st.write(f"{tier}: {pick['runner']} ({pick['odds_str']}) — votes {pick['votes']} — {pick['tie_break']}")
+                if race['value_flags']:
+                    st.write("Value Flags: " + "; ".join(race['value_flags']))
+                st.markdown("---")
 
 # TAB 2: SIDE-BY-SIDE COMPARISON MATRIX
 with tab2:
