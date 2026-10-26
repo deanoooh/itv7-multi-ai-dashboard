@@ -85,46 +85,101 @@ def parse_odds_to_decimal(odds_str):
 
 def parse_ai_text(text):
     """
-    Parses input blocks. Handles both single-runner lines:
-      '13:35 Doncaster - 1 Big Cigar (4/1)'
-    and multi-tier single-line outputs:
-      '13:35 Doncaster | Primary: Big Cigar (4/1) | Secondary: Bulletsnap (6/5) | Chaos: Mind Those Steps (4/1)'
+    Parses input blocks. Handles:
+      - standard lines: '13:35 Doncaster - 1 Big Cigar (4/1)'
+      - multi-tier lines: '13:35 Doncaster | Primary: Big Cigar (4/1) | Secondary: ... | Chaos: ...'
+      - full result-sheet style rows: '1st – Winner – (8) – Kartini – P Mulrennan – ... – 13/2'
     """
     races = []
     lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
-    
+
+    current_time = None
+    current_course = "Unknown"
     header_keywords = ['going', 'runners', 'e/w', 'odds', 'places', 'distance', 'class', 'handicap', 'standard']
-    
+
     for line in lines:
         line_lower = line.lower()
-        if any(keyword in line_lower for keyword in header_keywords) and not re.search(r'\(([\d/]+|evs)\)', line_lower):
+
+        # Detect race headers like '15:55 Galway – Going: Heavy – Runners: 19 ...'
+        header_match = re.match(
+            r'^\s*(\d{1,2}:\d{2})\s*[-–—]?\s*([A-Za-z][A-Za-z0-9&\'\s.-]+?)(?:\s*[-–—]\s*(?:Going|Runners|E/W|Odds|Places|Distance|Class|Handicap|Standard).*)?$',
+            line,
+            re.IGNORECASE
+        )
+        if header_match:
+            current_time = header_match.group(1)
+            course = header_match.group(2).strip()
+            course = re.sub(r'\s*[-–—].*$', '', course).strip()
+            current_course = course or "Unknown"
             continue
 
+        if any(keyword in line_lower for keyword in header_keywords) and not re.search(r'(\d+\s*/\s*\d+|evs)', line_lower):
+            continue
+
+        # Full result-sheet rows like:
+        # '1st – Winner – (8) – Kartini – P Mulrennan – S Whitaker – 13/2'
+        # 'PU – (1) – Grace Faraday – James Smith (3) – A McCann – 13/2'
+        if re.match(r'^(?:\d+(?:st|nd|rd|th)|PU)\b', line, re.IGNORECASE):
+            odds_match = re.search(r'(\d+\s*/\s*\d+(?:[a-zA-Z]+)?|evs|eve)', line, re.IGNORECASE)
+            if odds_match:
+                odds_str = re.sub(r'\s+', '', odds_match.group(1))
+                line_without_odds = line[:odds_match.start()].rstrip()
+                parts = [p.strip() for p in re.split(r'\s*[-–—]\s*', line_without_odds) if p.strip()]
+
+                runner = None
+                for part in parts:
+                    clean = re.sub(r'^\(|\)$', '', part).strip()
+                    if not clean or clean.lower() in {'winner', 'pu'}:
+                        continue
+                    if re.fullmatch(r'\(\d+\)', clean):
+                        continue
+                    if clean.lower() in {'hd', 'nk', 'sh', '1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th', '11th', '12th', '13th', '14th', '15th', '16th'}:
+                        continue
+                    if re.fullmatch(r'[\d\s¼½¾+-]+', clean):
+                        continue
+                    if re.search(r'[A-Za-z]', clean):
+                        runner = clean
+                        break
+
+                if runner:
+                    races.append({
+                        "time": current_time or "Unknown",
+                        "course": current_course,
+                        "runner": runner,
+                        "odds_str": odds_str,
+                        "odds_dec": parse_odds_to_decimal(odds_str),
+                        "primary": f"{runner} ({odds_str})",
+                        "secondary": "-",
+                        "chaos": "-"
+                    })
+                    continue
+
+        # Standard parser continues below
         time_match = re.search(r'(\d{1,2}:\d{2})\s*([A-Za-z\s]+)?', line)
         if time_match:
             r_time = time_match.group(1)
             course = time_match.group(2).strip() if time_match.group(2) else "Unknown"
             course = re.sub(r'[-–|—].*', '', course).strip()
-            
+
             # Check for multi-tier line (Primary/Secondary/Chaos)
             if 'primary:' in line_lower:
                 p_match = re.search(r'primary:\s*([^|(]+)\s*\(([\d/]+|evs)\)', line, re.IGNORECASE)
                 s_match = re.search(r'secondary:\s*([^|(]+)\s*\(([\d/]+|evs)\)', line, re.IGNORECASE)
                 c_match = re.search(r'chaos:\s*([^|(]+)\s*\(([\d/]+|evs)\)', line, re.IGNORECASE)
-                
+
                 p_runner = p_match.group(1).strip() if p_match else "N/A"
                 p_odds = p_match.group(2) if p_match else "2/1"
-                
+
                 s_runner = s_match.group(1).strip() if s_match else "N/A"
                 s_odds = s_match.group(2) if s_match else "2/1"
-                
+
                 c_runner = c_match.group(1).strip() if c_match else "N/A"
                 c_odds = c_match.group(2) if c_match else "2/1"
-                
+
                 races.append({
                     "time": r_time,
                     "course": course,
-                    "runner": p_runner,  # Default Primary runner for consensus matching
+                    "runner": p_runner,
                     "odds_str": p_odds,
                     "odds_dec": parse_odds_to_decimal(p_odds),
                     "primary": f"{p_runner} ({p_odds})",
@@ -135,12 +190,12 @@ def parse_ai_text(text):
                 # Standard single-runner line
                 odds_match = re.search(r'\(([\d/]+|evs)\)', line, re.IGNORECASE)
                 odds_str = odds_match.group(1) if odds_match else "2/1"
-                
+
                 cleaned = re.sub(r'^\d{1,2}:\d{2}\s*[-–—]?\s*', '', line)
                 cleaned = re.sub(r'\((.*?)\)', '', cleaned)
                 cleaned = re.sub(r'^\d+\s+', '', cleaned).strip()
                 cleaned = re.sub(r'^[-–—]\s*', '', cleaned).strip()
-                
+
                 if cleaned and not any(kw in cleaned.lower() for kw in ['going:', 'runners:', 'places:']):
                     races.append({
                         "time": r_time,
@@ -154,6 +209,7 @@ def parse_ai_text(text):
                     })
     return races
 
+
 def calculate_consensus(ai_list):
     """Aggregates picks across AIs, evaluates consensus, and applies strict profitability filters."""
     race_map = {}
@@ -162,7 +218,7 @@ def calculate_consensus(ai_list):
             r_time = p['time']
             if r_time not in race_map:
                 race_map[r_time] = {'course': p['course'], 'picks': {}}
-            
+
             runner = p['runner']
             if runner not in race_map[r_time]['picks']:
                 race_map[r_time]['picks'][runner] = {
@@ -179,13 +235,13 @@ def calculate_consensus(ai_list):
         picks = data['picks']
         if not picks:
             continue
-            
+
         sorted_runners = sorted(picks.items(), key=lambda x: x[1]['count'], reverse=True)
         top_runner, top_data = sorted_runners[0]
-        
+
         count = top_data['count']
         odds_dec = top_data['odds_dec']
-        
+
         if count == 4:
             agreement = "Unanimous (4/4)"
             badge_class = "badge-unanimous"
@@ -201,7 +257,7 @@ def calculate_consensus(ai_list):
 
         # PROFITABILITY & STAKING FILTER LOGIC
         is_no_bet = False
-        
+
         # Rule 1: Odds < 2/1 (Poor margin/odds cutoff)
         if odds_dec < 2.0:
             staking_rule = "🔴 No Bet (Price < 2/1)"
@@ -244,8 +300,8 @@ tab1, tab2, tab3 = st.tabs(["📝 1. Paste & Selections Hub", "📊 2. Side-by-S
 # TAB 1: PASTE & SELECTIONS HUB
 with tab1:
     st.subheader("Paste Selection Output Blocks")
-    st.info("Paste the daily raw text selections from your four AI prompt variations below.")
-    
+    st.info("Paste the daily raw text selections from your four AI prompt variations below, or a full racecard/result sheet in the same format you receive it.")
+
     col1, col2 = st.columns(2)
     with col1:
         ai1_text = st.text_area("AI #1 (ROI Variation A)", value=st.session_state.get('ai1_input', ''), height=180, key="ai1_area")
@@ -265,7 +321,7 @@ with tab1:
     if consensus_data:
         st.markdown("---")
         st.subheader("🎯 Auto-Generated 5th Consensus Selections")
-        
+
         c_rows = []
         for c in consensus_data:
             c_rows.append({
@@ -275,23 +331,23 @@ with tab1:
                 "Price": c['odds_str'],
                 "Staking Instruction": c['staking_rule']
             })
-        
+
         df_consensus = pd.DataFrame(c_rows)
         df_consensus.index = np.arange(1, len(df_consensus) + 1)
-        
+
         st.dataframe(df_consensus, use_container_width=True)
 
 # TAB 2: SIDE-BY-SIDE COMPARISON MATRIX
 with tab2:
     st.subheader("Multi-AI Side-by-Side Comparison Matrix")
-    
+
     if not consensus_data:
         st.warning("Please paste AI selections in Tab 1.")
     else:
         matrix_rows = []
         for c in consensus_data:
             r_time = c['time']
-            
+
             def get_pick(parsed_list):
                 for item in parsed_list:
                     if item['time'] == r_time:
@@ -309,7 +365,7 @@ with tab2:
                 "5th Consensus Pick": f"⭐ {c['consensus_runner']} ({c['odds_str']})",
                 "Overlap": f"{c['count']}/4"
             })
-        
+
         df_matrix = pd.DataFrame(matrix_rows)
         df_matrix.index = np.arange(1, len(df_matrix) + 1)
         st.dataframe(df_matrix, use_container_width=True)
